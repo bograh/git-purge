@@ -48,8 +48,46 @@ git purge restore feat/x   # bring back one branch
 git purge history          # everything ever purged in this repo
 ```
 
-Picker keys: `space` toggle · `s` all safe · `r` all review · `n` none ·
-`/` filter by name · `h` show kept branches · `enter` delete (asks to confirm) · `q` quit.
+### Stale branches
+
+Branches nobody touched in months are clutter even if they were never merged
+or never pushed. `--older-than` shows only branches whose last commit is older
+than the given age, and turns old `active`/`local` branches into **stale** ones
+you can pick (never preselected):
+
+```sh
+git purge --older-than 6mo                         # picker, oldest clutter only
+git purge list --older-than 90d
+git purge purge --yes --older-than 1y --include-stale   # scripted cleanup
+```
+
+Ages: `90d`, `6mo`, `2w`, `1y`, or Go durations like `36h`.
+
+### Every repository at once
+
+```sh
+git purge --all-repos ~/Code               # one picker across every repo
+git purge list --all-repos ~/Code --json
+git purge restore --last --all-repos ~/Code
+```
+
+Repositories are found up to `--depth` levels deep (default 3). Nested repos,
+`node_modules`, `vendor` and hidden folders are skipped, and up to four repos
+sync in parallel. One purge across many repos is one undo step.
+
+### Picker
+
+| Key | Action |
+|-----|--------|
+| `space` | toggle the branch under the cursor |
+| `p` / `tab` | **preview**: commits not on the base branch, commits that were never in the merged PR, and the diffstat (`←`/`→` steps through branches, `space` toggles) |
+| `s` / `r` / `t` | toggle all safe / review / stale |
+| `n` | select none |
+| `/` | filter by name |
+| `o` | sort oldest first within each section |
+| `h` | show kept branches |
+| `enter` | delete the selection (asks to confirm) |
+| `q` | quit |
 
 ## How a branch is judged
 
@@ -57,6 +95,7 @@ Picker keys: `space` toggle · `s` all safe · `r` all review · `n` none ·
 |-------------|---------|---------|
 | `safe`      | Every commit is already on the base branch: merged, squash-merged, rebase-merged, or the local tip is part of a merged PR | selected |
 | `review`    | Dead on remote, but no proof the work landed (PR closed unmerged, no PR found, or local commits beyond the merged PR) | not selected |
+| `stale`     | Only with `--older-than`: an active or local branch with no commits for that long | not selected |
 | `active`    | Still on the remote and not merged | never deleted |
 | `local`     | Never pushed and not merged | never deleted |
 | `protected` | Default branch, checked out (here or in a worktree), or matches a protect pattern | never deleted |
@@ -71,6 +110,8 @@ Evidence, cheapest first:
    A merged PR only counts as safe if the local tip **is** the PR head or an
    ancestor of it. If you committed after opening the PR, it shows as `review`.
    Terminal PR states are cached, so re-syncs only hit the API for new or changed branches.
+   With a GitHub token, lookups are batched through GraphQL, 50 branches per request,
+   so a first sync of 500 branches takes 10 requests instead of 500.
 
 ## Safety guarantees
 
