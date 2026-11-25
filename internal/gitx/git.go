@@ -358,3 +358,46 @@ func short(sha string) string {
 	}
 	return sha
 }
+
+// Preview describes what a branch would take with it if deleted.
+type Preview struct {
+	Base        string
+	MergeBase   string
+	Unmerged    []string // "sha subject (age)" for commits on the branch but not reachable from base
+	UnmergedN   int
+	NotInPR     []string // commits beyond the merged PR head, when known
+	NotInPRN    int
+	DiffStat    string // merge-base..branch
+	PatchMerged bool   // every unmerged commit has a patch-equivalent on base
+}
+
+const previewLimit = 30
+
+// BranchPreview gathers commits and the diffstat a branch carries relative to base.
+func (r *Repo) BranchPreview(base, sha, prHead string) (*Preview, error) {
+	p := &Preview{Base: base}
+	mb, err := r.Run("merge-base", base, sha)
+	if err != nil {
+		return nil, fmt.Errorf("no common history with %s", base)
+	}
+	p.MergeBase = mb
+	log := func(from, to string) ([]string, int) {
+		n, _ := r.CountCommits(from, to)
+		out, err := r.Run("log", "--no-color", fmt.Sprintf("-%d", previewLimit), "--format=%h %s (%cr)", from+".."+to)
+		if err != nil || out == "" {
+			return nil, n
+		}
+		return strings.Split(out, "\n"), n
+	}
+	p.Unmerged, p.UnmergedN = log(base, sha)
+	if prHead != "" && prHead != sha && r.CommitExists(prHead) {
+		p.NotInPR, p.NotInPRN = log(prHead, sha)
+	}
+	if p.UnmergedN > 0 {
+		if out, err := r.Run("cherry", base, sha, mb); err == nil {
+			p.PatchMerged = out != "" && allPatchEquivalent(out)
+		}
+	}
+	p.DiffStat, _ = r.Run("diff", "--no-color", "--stat=100", mb, sha)
+	return p, nil
+}
