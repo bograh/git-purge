@@ -64,6 +64,15 @@ var rank = map[string]int{
 type row struct {
 	b        store.Branch
 	selected bool
+
+	// Rendered-line cache: rows are redrawn only when their own state changes.
+	cache    string
+	cacheKey rowKey
+}
+
+type rowKey struct {
+	selected, cursor bool
+	width, nameW     int
 }
 
 // line is one rendered list line: a section heading or a branch row.
@@ -86,6 +95,12 @@ type Model struct {
 	confirm   bool
 	Confirmed bool
 	header    string
+
+	// Derived from rows + filter + showKept; rebuilt by refresh() only when
+	// those change, so cursor movement and redraws stay O(visible window).
+	vis   []*row
+	lns   []line
+	nameW int
 }
 
 // New builds the picker. Safe branches start selected; review branches don't.
@@ -95,6 +110,7 @@ func New(branches []store.Branch, header string) *Model {
 		m.rows = append(m.rows, &row{b: b, selected: b.Status == string(classify.Safe)})
 	}
 	sort.SliceStable(m.rows, func(i, j int) bool { return rank[m.rows[i].b.Status] < rank[m.rows[j].b.Status] })
+	m.refresh()
 	return m
 }
 
@@ -109,7 +125,18 @@ func (m *Model) Selected() []store.Branch {
 	return out
 }
 
-func (m *Model) visible() []*row {
+func (m *Model) visible() []*row { return m.vis }
+
+func (m *Model) lines() []line { return m.lns }
+
+// refresh rebuilds the visible rows, list lines and name column width.
+func (m *Model) refresh() {
+	m.vis = m.filterRows()
+	m.lns = m.buildLines()
+	m.nameW = m.computeNameWidth()
+}
+
+func (m *Model) filterRows() []*row {
 	var out []*row
 	q := strings.ToLower(m.filter)
 	for _, r := range m.rows {
@@ -134,10 +161,10 @@ func sectionOf(status string) string {
 	return "Kept"
 }
 
-func (m *Model) lines() []line {
+func (m *Model) buildLines() []line {
 	var out []line
 	prev := ""
-	for i, r := range m.visible() {
+	for i, r := range m.vis {
 		if s := sectionOf(r.b.Status); s != prev {
 			if prev != "" {
 				out = append(out, line{heading: " "})
@@ -156,6 +183,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.nameW = m.computeNameWidth()
+		m.clamp()
 	case tea.KeyMsg:
 		if m.confirm {
 			switch msg.String() {
@@ -183,6 +212,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case tea.KeyRunes, tea.KeySpace:
 				m.filter += string(msg.Runes)
 			}
+			m.refresh()
 			m.cursor = 0
 			m.clamp()
 			return m, nil
@@ -194,6 +224,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc":
 			if m.filter != "" {
 				m.filter = ""
+				m.refresh()
 			} else {
 				return m, tea.Quit
 			}
@@ -230,6 +261,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cur = vis[m.cursor]
 			}
 			m.showKept = !m.showKept
+			m.refresh()
 			m.cursor = 0
 			for i, r := range m.visible() {
 				if r == cur {
@@ -374,9 +406,8 @@ func (m *Model) View() string {
 			rendered++
 		}
 	}
-	nameW := m.nameWidth()
 	for i := m.offset; i < len(lines) && rendered < lh; i++ {
-		b.WriteString(m.renderLine(lines[i], nameW) + "\n")
+		b.WriteString(m.renderLine(lines[i], m.nameW) + "\n")
 		rendered++
 	}
 	for ; rendered < lh; rendered++ {
@@ -389,9 +420,9 @@ func (m *Model) View() string {
 	return b.String()
 }
 
-func (m *Model) nameWidth() int {
+func (m *Model) computeNameWidth() int {
 	n := 12
-	for _, r := range m.visible() {
+	for _, r := range m.vis {
 		if l := lipgloss.Width(r.b.Name); l > n {
 			n = l
 		}
@@ -422,6 +453,16 @@ func (m *Model) renderLine(l line, nameW int) string {
 
 	r := l.r
 	isCursor := l.idx == m.cursor
+	key := rowKey{selected: r.selected, cursor: isCursor, width: w, nameW: nameW}
+	if r.cache != "" && r.cacheKey == key {
+		return r.cache
+	}
+	r.cache, r.cacheKey = m.renderRow(r, isCursor, nameW), key
+	return r.cache
+}
+
+func (m *Model) renderRow(r *row, isCursor bool, nameW int) string {
+	w := m.width
 	bg := lipgloss.NewStyle()
 	if isCursor {
 		bg = bg.Background(cCursor)
@@ -558,6 +599,10 @@ func (m *Model) viewConfirm() string {
 
 // Run shows the picker and returns the chosen branches (nil if cancelled).
 func Run(branches []store.Branch, header string) ([]store.Branch, error) {
+	// Detect the terminal background before bubbletea starts reading stdin.
+	// Done lazily on first render instead, the OSC 11 query races the input
+	// reader and can stall startup or leak escape codes as keypresses.
+	lipgloss.HasDarkBackground()
 	m := New(branches, header)
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		return nil, err

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/bograh/git-purge/internal/store"
 )
@@ -58,4 +59,27 @@ func names(bs []store.Branch) string {
 		s = append(s, b.Name)
 	}
 	return strings.Join(s, ",")
+}
+
+// The row cache must never serve stale output.
+func TestRowCacheInvalidation(t *testing.T) {
+	m := New([]store.Branch{{Name: "a", Status: "safe"}, {Name: "b", Status: "safe"}}, "test")
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	before := m.View()
+	m.Update(key(" ")) // deselect a, cursor moves to b
+	if m.View() == before {
+		t.Fatal("view did not change after toggling selection")
+	}
+	m.Update(key("k"))
+	m.Update(key(" ")) // reselect a, cursor back on b
+	m.Update(key("k"))
+	if got := m.View(); got != before {
+		t.Fatalf("view differs after restoring state:\n%s\nvs\n%s", got, before)
+	}
+	m.Update(tea.WindowSizeMsg{Width: 50, Height: 20})
+	for _, l := range strings.Split(m.View(), "\n") {
+		if w := lipgloss.Width(l); w > 50 {
+			t.Fatalf("line wider than terminal after resize (%d): %q", w, l)
+		}
+	}
 }
