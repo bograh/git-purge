@@ -21,7 +21,7 @@ func AgeFilter(branches []store.Branch, minAge time.Duration, now time.Time) []s
 		if age < minAge {
 			continue
 		}
-		days := classify.HumanAge(age.Truncate(24 * time.Hour))
+		days := roughAge(age)
 		switch classify.Status(b.Status) {
 		case classify.Active:
 			b.Status, b.Reason = string(classify.Stale), fmt.Sprintf("no commits for %s; still on remote, unmerged", days)
@@ -31,4 +31,17 @@ func AgeFilter(branches []store.Branch, minAge time.Duration, now time.Time) []s
 		out = append(out, b)
 	}
 	return out
+}
+
+// roughAge renders an age in one consistent unit: days under two months,
+// months under a year, then years.
+func roughAge(d time.Duration) string {
+	days := int(d.Hours() / 24)
+	switch {
+	case days < 60:
+		return fmt.Sprintf("%dd", days)
+	case days < 365:
+		return fmt.Sprintf("%dmo", (days+15)/30)
+	}
+	return fmt.Sprintf("%.1fy", float64(days)/365)
 }

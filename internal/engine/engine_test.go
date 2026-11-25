@@ -330,3 +330,12 @@ func TestAgeFilter(t *testing.T) {
 		t.Error("zero age must not filter")
 	}
 }
+
+func TestRoughAge(t *testing.T) {
+	day := 24 * time.Hour
+	for d, want := range map[time.Duration]string{10 * day: "10d", 230 * day: "8mo", 300 * day: "10mo", 410 * day: "1.1y"} {
+		if got := roughAge(d); got != want {
+			t.Errorf("%v: %s, want %s", d, got, want)
+		}
+	}
+}
