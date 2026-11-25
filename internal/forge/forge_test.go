@@ -2,6 +2,7 @@ package forge
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -75,5 +76,53 @@ func TestRateLimit(t *testing.T) {
 		t.Fatal("expected rate limit error")
 	} else if _, ok := err.(*RateLimitError); !ok {
 		t.Fatalf("got %T %v", err, err)
+	}
+}
+
+func TestGitHubFindPRsGraphQL(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/graphql" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		var req struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		if req.Variables["h0"] != "feat/a" || req.Variables["h1"] != `we"ird` || req.Variables["owner"] != "acme" {
+			t.Errorf("variables %v", req.Variables)
+		}
+		w.Write([]byte(`{"data":{"repository":{
+			"b0":{"nodes":[
+				{"number":9,"state":"MERGED","url":"u9","headRefOid":"s9","headRefName":"feat/a","headRepositoryOwner":{"login":"someone-else"}},
+				{"number":4,"state":"CLOSED","url":"u4","headRefOid":"s4","headRefName":"feat/a","headRepositoryOwner":{"login":"Me"}},
+				{"number":5,"state":"MERGED","url":"u5","headRefOid":"s5","headRefName":"feat/a","headRepositoryOwner":{"login":"me"}}]},
+			"b1":{"nodes":[]}}}}`))
+	}))
+	defer srv.Close()
+	g := &GitHub{API: srv.URL, Base: Remote{"github.com", "acme/widgets"}, HeadOwner: "me", Token: "t", Client: srv.Client()}
+	got, err := g.FindPRs(context.Background(), []string{"feat/a", `we"ird`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("%d requests, want 1", calls)
+	}
+	if p := got["feat/a"]; p == nil || p.Number != 5 || p.State != StateMerged || p.HeadSHA != "s5" {
+		t.Fatalf("feat/a = %+v (fork PR #9 must be ignored)", p)
+	}
+	if _, ok := got[`we"ird`]; ok {
+		t.Fatal("branch without PRs should be absent")
+	}
+}
+
+func TestGraphQLURL(t *testing.T) {
+	if u := (&GitHub{API: "https://api.github.com"}).graphqlURL(); u != "https://api.github.com/graphql" {
+		t.Error(u)
+	}
+	if u := (&GitHub{API: "https://ghe.corp/api/v3"}).graphqlURL(); u != "https://ghe.corp/api/graphql" {
+		t.Error(u)
 	}
 }

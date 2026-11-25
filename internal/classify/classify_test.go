@@ -2,6 +2,7 @@ package classify
 
 import (
 	"testing"
+	"time"
 
 	"github.com/bograh/git-purge/internal/forge"
 )
@@ -46,5 +47,23 @@ func TestClassify(t *testing.T) {
 func TestMatchesAny(t *testing.T) {
 	if !MatchesAny("release/1.2", DefaultProtect) || MatchesAny("feature/x", DefaultProtect) {
 		t.Fatal("pattern matching wrong")
+	}
+}
+
+func TestParseAge(t *testing.T) {
+	day := 24 * time.Hour
+	cases := map[string]time.Duration{"90d": 90 * day, "6mo": 180 * day, "2w": 14 * day, "1y": 365 * day, "36h": 36 * time.Hour, "1.5d": 36 * time.Hour}
+	for in, want := range cases {
+		if got, err := ParseAge(in); err != nil || got != want {
+			t.Errorf("%s: %v %v", in, got, err)
+		}
+	}
+	for _, bad := range []string{"", "abc", "-3d", "d"} {
+		if _, err := ParseAge(bad); err == nil {
+			t.Errorf("%q should fail", bad)
+		}
+	}
+	if HumanAge(90*day) != "3mo" || HumanAge(400*day) != "400d" || HumanAge(730*day) != "2y" {
+		t.Errorf("HumanAge: %s %s %s", HumanAge(90*day), HumanAge(400*day), HumanAge(730*day))
 	}
 }

@@ -21,6 +21,8 @@ type Options struct {
 	Protect  []string // extra protect patterns
 	Workers  int
 	Progress func(format string, args ...any)
+	// Forge overrides forge detection from the remotes (used by tests).
+	Forge forge.Forge
 }
 
 // Result is the outcome of a sync.
@@ -29,6 +31,9 @@ type Result struct {
 	Forge    string
 	Branches []store.Branch
 	Warnings []string
+	// Notes are informational (e.g. no supported forge for this remote); worth
+	// showing for a single repo, noise when scanning many.
+	Notes []string
 }
 
 const prNone = "none" // cached "no PR found" marker
@@ -86,10 +91,13 @@ func Sync(ctx context.Context, repo *gitx.Repo, st *store.Store, rec *store.Repo
 
 	var fg forge.Forge
 	baseRemote := "origin"
-	if !opt.Offline {
+	if opt.Forge != nil && !opt.Offline {
+		fg = opt.Forge
+		res.Forge = fg.Name()
+	} else if !opt.Offline {
 		fg, baseRemote, err = detectForge(repo)
 		if err != nil {
-			warn("forge lookups disabled: %v", err)
+			res.Notes = append(res.Notes, fmt.Sprintf("no PR lookups (%v); using git evidence only", err))
 		} else {
 			res.Forge = fg.Name()
 		}
@@ -148,21 +156,54 @@ func Sync(ctx context.Context, repo *gitx.Repo, st *store.Store, rec *store.Repo
 		if len(lookups) > 0 {
 			progress("Asking %s about %d branch(es)…", fg.Name(), len(lookups))
 		}
+		branchName := func(it *item) string {
+			if n := it.b.UpstreamBranch(); n != "" {
+				return n
+			}
+			return it.b.Name
+		}
+		record := func(it *item, pr *forge.PR) {
+			it.ev.PR = pr
+			it.row.PRChecked = it.b.SHA
+			if pr == nil {
+				it.row.PRState = prNone
+			}
+		}
+		fatalErr := func(err error) bool {
+			var rl *forge.RateLimitError
+			return errors.Is(err, forge.ErrUnauthorized) || errors.As(err, &rl)
+		}
+
+		var fatal error
+		rest := lookups
+		if bf, ok := fg.(forge.BatchFinder); ok && bf.CanBatch() && len(lookups) > 1 {
+			names := make([]string, len(lookups))
+			for i, it := range lookups {
+				names[i] = branchName(it)
+			}
+			found, err := bf.FindPRs(ctx, names)
+			switch {
+			case err == nil:
+				for _, it := range lookups {
+					record(it, found[branchName(it)])
+				}
+				rest = nil
+			case fatalErr(err):
+				fatal, rest = err, nil
+			default:
+				warn("%s batch lookup failed, falling back to one request per branch: %v", fg.Name(), err)
+			}
+		}
+
 		ctx, cancel := context.WithCancel(ctx)
 		var mu sync.Mutex
-		var fatal error
 		failed := 0
-		parallel(lookups, opt.Workers, func(it *item) {
-			name := it.b.UpstreamBranch()
-			if name == "" {
-				name = it.b.Name
-			}
-			pr, err := fg.FindPR(ctx, name)
+		parallel(rest, opt.Workers, func(it *item) {
+			pr, err := fg.FindPR(ctx, branchName(it))
 			if err != nil {
 				mu.Lock()
 				defer mu.Unlock()
-				var rl *forge.RateLimitError
-				if errors.Is(err, forge.ErrUnauthorized) || errors.As(err, &rl) {
+				if fatalErr(err) {
 					if fatal == nil {
 						fatal = err
 						cancel()
@@ -175,11 +216,7 @@ func Sync(ctx context.Context, repo *gitx.Repo, st *store.Store, rec *store.Repo
 				}
 				return
 			}
-			it.ev.PR = pr
-			it.row.PRChecked = it.b.SHA
-			if pr == nil {
-				it.row.PRState = prNone
-			}
+			record(it, pr)
 		})
 		cancel()
 		if fatal != nil {
@@ -303,8 +340,8 @@ type Outcome struct {
 
 // Purge deletes the given branches. Each deletion is a compare-and-swap on the
 // synced SHA and is logged so it can be restored.
-func Purge(repo *gitx.Repo, st *store.Store, rec *store.Repo, branches []store.Branch, dryRun bool) []Outcome {
-	batch := store.NewBatch()
+// batch groups deletions for `restore --last`; use store.NewBatch().
+func Purge(repo *gitx.Repo, st *store.Store, rec *store.Repo, branches []store.Branch, batch int64, dryRun bool) []Outcome {
 	var out []Outcome
 	for _, b := range branches {
 		if !classify.Status(b.Status).Deletable() {

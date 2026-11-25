@@ -25,10 +25,13 @@ const (
 	Local Status = "local"
 	// Protected: default branch, checked out, or matches a protect pattern.
 	Protected Status = "protected"
+	// Stale: an active or local branch with no commits for longer than the
+	// --older-than threshold. Offered for deletion, never preselected.
+	Stale Status = "stale"
 )
 
 // Deletable reports whether the status is offered for deletion at all.
-func (s Status) Deletable() bool { return s == Safe || s == Review }
+func (s Status) Deletable() bool { return s == Safe || s == Review || s == Stale }
 
 // Evidence is everything known about one branch.
 type Evidence struct {

@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/bograh/git-purge/internal/forge"
 	"github.com/bograh/git-purge/internal/gitx"
 	"github.com/bograh/git-purge/internal/store"
 )
@@ -157,7 +159,7 @@ func TestSyncPurgeRestore(t *testing.T) {
 	commit(t, work, "new.txt", "new work\n")
 	git(t, work, "checkout", "-q", "main")
 
-	out := Purge(repo, st, rec, []store.Branch{got["feat/merged"], got["feat/squashed"], got["feat/active"]}, false)
+	out := Purge(repo, st, rec, []store.Branch{got["feat/merged"], got["feat/squashed"], got["feat/active"]}, store.NewBatch(), false)
 	if out[0].Err != nil {
 		t.Fatalf("merged: %v", out[0].Err)
 	}
@@ -187,5 +189,153 @@ func TestSyncPurgeRestore(t *testing.T) {
 	}
 	if up := git(t, work, "config", "branch.feat/merged.merge"); up != "refs/heads/feat/merged" {
 		t.Fatalf("upstream config not restored: %q", up)
+	}
+}
+
+// fakeForge answers from a fixed table and records how it was queried.
+type fakeForge struct {
+	prs        map[string]*forge.PR
+	batchCalls int
+	restCalls  int
+}
+
+func (f *fakeForge) Name() string         { return "Fake" }
+func (f *fakeForge) HeadRef(n int) string { return "refs/pull/x/head" }
+func (f *fakeForge) CanBatch() bool       { return true }
+func (f *fakeForge) FindPR(_ context.Context, b string) (*forge.PR, error) {
+	f.restCalls++
+	return f.prs[b], nil
+}
+func (f *fakeForge) FindPRs(_ context.Context, bs []string) (map[string]*forge.PR, error) {
+	f.batchCalls++
+	out := map[string]*forge.PR{}
+	for _, b := range bs {
+		if p, ok := f.prs[b]; ok {
+			out[b] = p
+		}
+	}
+	return out, nil
+}
+
+func open(t *testing.T, work string) (*gitx.Repo, *store.Store, *store.Repo) {
+	t.Helper()
+	repo, err := gitx.Open(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	rec, err := st.Repo(repo.CommonDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repo, st, rec
+}
+
+func TestSyncUsesBatchLookupAndPRHeads(t *testing.T) {
+	work := scenario(t)
+	repo, st, rec := open(t, work)
+
+	abandoned := git(t, work, "rev-parse", "feat/abandoned")
+	extraPushed := git(t, work, "rev-parse", "feat/extra~1") // what the PR saw before the later local commit
+	f := &fakeForge{prs: map[string]*forge.PR{
+		"feat/abandoned": {Number: 11, State: forge.StateMerged, HeadSHA: abandoned},
+		"feat/extra":     {Number: 12, State: forge.StateMerged, HeadSHA: extraPushed},
+	}}
+	res, err := Sync(context.Background(), repo, st, rec, Options{NoFetch: true, Forge: f})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.batchCalls != 1 || f.restCalls != 0 {
+		t.Fatalf("batch=%d rest=%d, want one batch call and no REST calls", f.batchCalls, f.restCalls)
+	}
+	got := map[string]store.Branch{}
+	for _, b := range res.Branches {
+		got[b.Name] = b
+	}
+	if b := got["feat/abandoned"]; b.Status != "safe" || b.PRNumber != 11 {
+		t.Errorf("abandoned with merged PR at same head: %s (%s)", b.Status, b.Reason)
+	}
+	if b := got["feat/extra"]; b.Status != "review" || !strings.Contains(b.Reason, "1 local commit") {
+		t.Errorf("extra commits beyond merged PR: %s (%s)", b.Status, b.Reason)
+	}
+
+	// Second sync: merged/closed PRs are cached for unchanged tips. Only
+	// feat/active ("no PR yet" is not terminal) is asked again, and a single
+	// lookup goes through the per-branch path.
+	f.batchCalls, f.restCalls = 0, 0
+	if _, err := Sync(context.Background(), repo, st, rec, Options{NoFetch: true, Forge: f}); err != nil {
+		t.Fatal(err)
+	}
+	if f.batchCalls != 0 || f.restCalls != 1 {
+		t.Fatalf("re-sync lookups: batch=%d rest=%d, want 0 and 1", f.batchCalls, f.restCalls)
+	}
+}
+
+func TestBranchPreview(t *testing.T) {
+	work := scenario(t)
+	repo, _, _ := open(t, work)
+
+	p, err := repo.BranchPreview("origin/main", git(t, work, "rev-parse", "feat/abandoned"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.UnmergedN != 1 || len(p.Unmerged) != 1 || !strings.Contains(p.Unmerged[0], "edit ab.txt") || p.PatchMerged {
+		t.Errorf("abandoned preview: %+v", p)
+	}
+	if !strings.Contains(p.DiffStat, "ab.txt") {
+		t.Errorf("diffstat missing file: %q", p.DiffStat)
+	}
+
+	p, _ = repo.BranchPreview("origin/main", git(t, work, "rev-parse", "feat/rebased"), "")
+	if p.UnmergedN != 2 || !p.PatchMerged {
+		t.Errorf("rebased preview should be patch-merged: %+v", p)
+	}
+
+	extra := git(t, work, "rev-parse", "feat/extra")
+	p, _ = repo.BranchPreview("origin/main", extra, git(t, work, "rev-parse", "feat/extra~1"))
+	if p.NotInPRN != 1 || !strings.Contains(p.NotInPR[0], "edit ex2.txt") {
+		t.Errorf("commits beyond PR head: %+v", p)
+	}
+}
+
+func TestAgeFilter(t *testing.T) {
+	now := time.Now()
+	day := 24 * time.Hour
+	in := []store.Branch{
+		{Name: "old-active", Status: "active", CommitTime: now.Add(-100 * day)},
+		{Name: "old-local", Status: "local", CommitTime: now.Add(-100 * day)},
+		{Name: "old-safe", Status: "safe", Reason: "merged", CommitTime: now.Add(-100 * day)},
+		{Name: "old-main", Status: "protected", CommitTime: now.Add(-100 * day)},
+		{Name: "new-safe", Status: "safe", CommitTime: now.Add(-1 * day)},
+	}
+	out := AgeFilter(in, 90*day, now)
+	got := map[string]string{}
+	for _, b := range out {
+		got[b.Name] = b.Status
+	}
+	want := map[string]string{"old-active": "stale", "old-local": "stale", "old-safe": "safe", "old-main": "protected"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v", got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s: %s, want %s", k, got[k], v)
+		}
+	}
+	if len(AgeFilter(in, 0, now)) != len(in) {
+		t.Error("zero age must not filter")
+	}
+}
+
+func TestRoughAge(t *testing.T) {
+	day := 24 * time.Hour
+	for d, want := range map[time.Duration]string{10 * day: "10d", 230 * day: "8mo", 300 * day: "10mo", 410 * day: "1.1y"} {
+		if got := roughAge(d); got != want {
+			t.Errorf("%v: %s, want %s", d, got, want)
+		}
 	}
 }
