@@ -22,7 +22,7 @@ func benchModel(n int) *Model {
 			Gone: i%3 == 0, Upstream: "origin/x", Reason: "PR #482 merged; local tip is part of it; remote branch deleted",
 			Subject: "Some commit subject", CommitTime: time.Now().Add(-time.Duration(i) * time.Hour)})
 	}
-	m := New(bs, "origin/main · GitHub")
+	m := newTest(bs, "origin/main · GitHub")
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	return m
 }
