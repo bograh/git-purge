@@ -9,13 +9,22 @@ work actually landed, and lets you delete them from an interactive picker.
 Every deletion can be undone.
 
 ```
-git-purge · base origin/main · 214 branches · GitHub
-131 safe  9 need review  74 kept  131 selected
+ git-purge   origin/main · GitHub · 214 branches            ● 131 safe  ● 9 review  ○ 74 kept
 
-[x] feat/login-flow     safe      ✗ gone   3mo  PR #482 merged; local tip is part of it
-[x] fix/typo            safe      ✗ gone   5mo  squash/rebase-merged into origin/main; remote branch deleted
-[ ] spike/new-cache     review    ✗ gone   8mo  PR #377 closed without merging; remote branch deleted
-[ ] feat/billing        review    ✗ gone   2mo  PR #501 merged, but 2 local commit(s) were never in it
+  SAFE TO DELETE ───────────────────────────────────────────────────────────────
+▌ ✓  feat/login-flow     ✗ gone   3mo  PR #482 merged; local tip is part of it
+  ✓  fix/typo            ✗ gone   5mo  squash/rebase-merged into origin/main
+
+  NEEDS REVIEW ─────────────────────────────────────────────────────────────────
+  ○  spike/new-cache     ✗ gone   8mo  PR #377 closed without merging
+  ○  feat/billing        ✗ gone   2mo  PR #501 merged, but 2 local commit(s) were never in it
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ feat/login-flow  ● safe                                                      │
+│ a1b2c3d4e5 · Aug 22 2026 · origin/feat/login-flow deleted on remote          │
+│ “Add OAuth login flow”                                                       │
+│ → PR #482 merged; local tip is part of it  ·  https://github.com/acme/app/…  │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ space toggle · s safe · r review · n none · / filter · h kept · q quit   enter delete 131
 ```
 
 ## Install
@@ -40,7 +49,7 @@ git purge history          # everything ever purged in this repo
 ```
 
 Picker keys: `space` toggle · `s` all safe · `r` all review · `n` none ·
-`h` show kept branches · `enter` delete · `q` quit.
+`/` filter by name · `h` show kept branches · `enter` delete (asks to confirm) · `q` quit.
 
 ## How a branch is judged
 
